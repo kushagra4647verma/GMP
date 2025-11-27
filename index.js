@@ -17,23 +17,37 @@ let cachedData = null;
 let lastFetchTime = null;
 const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 
-// IMPROVED: More robust scraper that adapts to column changes
+const puppeteer = require("puppeteer-core");
+
 async function scrapeIPOData() {
   let browser = null;
 
   try {
+    // Use pre-installed Chrome from build step
+    const chromePath =
+      process.env.CHROME_PATH || "/tmp/chrome/chrome-linux/chrome";
+
     browser = await puppeteer.launch({
       headless: true,
+      executablePath: chromePath,
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-accelerated-2d-canvas",
         "--disable-gpu",
+        "--no-first-run",
+        "--no-zygote",
+        "--single-process", // Important for low-memory environments
+        "--disable-extensions",
+        "--disable-default-apps",
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
       ],
-      timeout: 60000,
     });
 
+    // Rest of your scraping code stays the same...
     const page = await browser.newPage();
 
     // Better user agent
