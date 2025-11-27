@@ -1,13 +1,22 @@
-// server.js - MORE SCALABLE IPO Data Proxy Server
-// Install: npm install express puppeteer cors
-
+// server.js - IPO Data Proxy Server (Fixed for Render)
 const express = require("express");
 const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
+
+// Try to load puppeteer (with bundled Chrome) first, fall back to puppeteer-core
+let puppeteer;
+try {
+  puppeteer = require("puppeteer");
+  console.log("✓ Using puppeteer (bundled Chrome)");
+} catch (e) {
+  puppeteer = require("puppeteer-core");
+  console.log("✓ Using puppeteer-core (requires external Chrome)");
+}
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-process.env.PUPPETEER_SKIP_DOWNLOAD = "true";
 
 const PORT = process.env.PORT || 3000;
 
@@ -16,19 +25,70 @@ let cachedData = null;
 let lastFetchTime = null;
 const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 
-const puppeteer = require("puppeteer-core");
+// Function to find Chrome executable
+function findChromeExecutable() {
+  // First check if CHROME_PATH env variable is set
+  if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
+    console.log(`✓ Using CHROME_PATH: ${process.env.CHROME_PATH}`);
+    return process.env.CHROME_PATH;
+  }
+
+  const basePath = "/tmp/chrome";
+
+  try {
+    // Check if base path exists (production/Render)
+    if (!fs.existsSync(basePath)) {
+      console.log("ℹ️  /tmp/chrome does not exist (probably localhost)");
+      return null; // Will use bundled Chrome
+    }
+
+    // List contents of /tmp/chrome
+    const contents = fs.readdirSync(basePath);
+    console.log("📁 Contents of /tmp/chrome:", contents);
+
+    // Look for chrome-linux64 directory (new format) or chrome-linux (old format)
+    for (const item of contents) {
+      const versionPath = path.join(basePath, item);
+
+      // Try chrome-linux64/chrome (new format)
+      let chromePath = path.join(versionPath, "chrome-linux64", "chrome");
+      if (fs.existsSync(chromePath)) {
+        console.log(`✓ Found Chrome at: ${chromePath}`);
+        return chromePath;
+      }
+
+      // Try chrome-linux/chrome (old format)
+      chromePath = path.join(versionPath, "chrome-linux", "chrome");
+      if (fs.existsSync(chromePath)) {
+        console.log(`✓ Found Chrome at: ${chromePath}`);
+        return chromePath;
+      }
+
+      // Try direct chrome executable
+      chromePath = path.join(versionPath, "chrome");
+      if (fs.existsSync(chromePath)) {
+        console.log(`✓ Found Chrome at: ${chromePath}`);
+        return chromePath;
+      }
+    }
+
+    console.log("⚠️  Chrome executable not found in /tmp/chrome");
+    return null;
+  } catch (error) {
+    console.error("Error finding Chrome:", error);
+    return null;
+  }
+}
 
 async function scrapeIPOData() {
   let browser = null;
 
   try {
-    // Use pre-installed Chrome from build step
-    const chromePath =
-      process.env.CHROME_PATH || "/tmp/chrome/chrome-linux/chrome";
+    const executablePath = findChromeExecutable();
 
-    browser = await puppeteer.launch({
+    // Launch configuration
+    const launchOptions = {
       headless: true,
-      executablePath: chromePath,
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -37,19 +97,29 @@ async function scrapeIPOData() {
         "--disable-gpu",
         "--no-first-run",
         "--no-zygote",
-        "--single-process", // Important for low-memory environments
+        "--single-process",
         "--disable-extensions",
         "--disable-default-apps",
         "--disable-background-timer-throttling",
         "--disable-renderer-backgrounding",
         "--disable-backgrounding-occluded-windows",
       ],
-    });
+    };
 
-    // Rest of your scraping code stays the same...
+    // Only set executablePath if we found one (production)
+    // Otherwise let puppeteer use its bundled Chrome (localhost)
+    if (executablePath) {
+      launchOptions.executablePath = executablePath;
+      console.log("🚀 Launching with custom Chrome path");
+    } else {
+      console.log("🚀 Launching with bundled Chrome (localhost)");
+    }
+
+    browser = await puppeteer.launch(launchOptions);
+    browser = await puppeteer.launch(launchOptions);
+
     const page = await browser.newPage();
 
-    // Better user agent
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
@@ -70,17 +140,14 @@ async function scrapeIPOData() {
     const ipos = await page.evaluate(() => {
       const data = [];
 
-      // IMPROVED: Find column indices dynamically by header text
       const headerRow = document.querySelector("#report_table thead tr");
       const headers = Array.from(headerRow?.querySelectorAll("th") || []);
 
-      // Map header text to column index
       const columnMap = {};
       headers.forEach((header, index) => {
         const text = header.textContent.trim().toLowerCase();
         columnMap[text] = index;
 
-        // Handle variations
         if (text.includes("name")) columnMap["name"] = index;
         if (text.includes("gmp")) columnMap["gmp"] = index;
         if (text.includes("rating") || text.includes("rate"))
@@ -102,7 +169,6 @@ async function scrapeIPOData() {
       const rows = document.querySelectorAll("#report_table tbody tr");
 
       rows.forEach((row) => {
-        // Skip header rows within tbody
         if (
           row.classList.contains("tbody-repeated-header") ||
           row.querySelector("th")
@@ -111,9 +177,8 @@ async function scrapeIPOData() {
         }
 
         const cells = row.querySelectorAll("td");
-        if (cells.length < 5) return; // Need at least some basic cells
+        if (cells.length < 5) return;
 
-        // Extract name (usually first column with a link)
         const nameCell = cells[columnMap["name"] || 0];
         const nameLink = nameCell?.querySelector("a");
         const name = nameLink
@@ -122,18 +187,15 @@ async function scrapeIPOData() {
 
         if (!name || name.length < 3) return;
 
-        // Helper function to safely get cell text
         const getCellText = (columnName, defaultIndex) => {
           const index = columnMap[columnName] ?? defaultIndex;
           if (index >= cells.length) return "";
 
           const cell = cells[index];
-          // Check for div content first (GMP often has this)
           const div = cell.querySelector("div");
           return div ? div.textContent.trim() : cell.textContent.trim();
         };
 
-        // Extract data using dynamic column mapping with fallbacks
         const ipoData = {
           name: name,
           gmp: getCellText("gmp", 1) || "₹-- (0%)",
@@ -159,10 +221,8 @@ async function scrapeIPOData() {
 
     console.log(`✓ Scraped ${ipos.length} IPOs`);
 
-    // Additional processing: categorize IPOs
     const now = new Date();
     const processedIPOs = ipos.map((ipo) => {
-      // Determine status based on dates
       let status = "Unknown";
       const closeText = ipo.close.toLowerCase();
 
@@ -171,7 +231,6 @@ async function scrapeIPOData() {
       } else if (closeText === "-" || closeText === "") {
         status = "Upcoming";
       } else {
-        // Parse close date to determine if open/closed
         const closeDate = parseDate(ipo.close);
         if (closeDate) {
           const daysDiff = Math.floor(
@@ -215,7 +274,6 @@ async function scrapeIPOData() {
   }
 }
 
-// Helper: Parse date from text like "25-Nov"
 function parseDate(dateText) {
   if (!dateText || dateText === "-") return null;
 
@@ -243,9 +301,7 @@ function parseDate(dateText) {
         const now = new Date();
         let year = now.getFullYear();
 
-        // Smart year detection
         if (month < now.getMonth()) {
-          // If month has passed, check if it should be next year
           const testDate = new Date(year, month, day);
           if (now - testDate > 30 * 24 * 60 * 60 * 1000) {
             year++;
@@ -262,12 +318,10 @@ function parseDate(dateText) {
   return null;
 }
 
-// Main API endpoint
 app.get("/api/ipos", async (req, res) => {
   try {
     const now = Date.now();
 
-    // Return cached data if valid
     if (cachedData && lastFetchTime && now - lastFetchTime < CACHE_DURATION) {
       console.log(
         `Returning cached data (${Math.floor(
@@ -291,7 +345,6 @@ app.get("/api/ipos", async (req, res) => {
   } catch (error) {
     console.error("API error:", error);
 
-    // Return stale cache if available on error
     if (cachedData) {
       return res.json({
         ...cachedData,
@@ -310,7 +363,6 @@ app.get("/api/ipos", async (req, res) => {
   }
 });
 
-// Health check
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
@@ -323,7 +375,6 @@ app.get("/health", (req, res) => {
   });
 });
 
-// Force refresh endpoint
 app.post("/api/refresh", async (req, res) => {
   try {
     console.log("Force refresh requested");
@@ -344,7 +395,6 @@ app.post("/api/refresh", async (req, res) => {
   }
 });
 
-// Get specific IPO by name
 app.get("/api/ipos/:name", async (req, res) => {
   try {
     if (!cachedData) {
@@ -368,7 +418,6 @@ app.get("/api/ipos/:name", async (req, res) => {
   }
 });
 
-// Start server
 app.listen(PORT, () => {
   console.log(`🚀 IPO Proxy Server running on port ${PORT}`);
   console.log(`📊 API endpoint: http://localhost:${PORT}/api/ipos`);
@@ -376,7 +425,6 @@ app.listen(PORT, () => {
   console.log(`🔄 Force refresh: POST http://localhost:${PORT}/api/refresh`);
 });
 
-// Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("SIGTERM received, shutting down gracefully");
   process.exit(0);
