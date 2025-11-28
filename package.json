@@ -2,15 +2,16 @@
   "name": "gmpapp",
   "version": "1.0.0",
   "type": "commonjs",
-  "main": "server.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
     "@puppeteer/browsers": "^2.4.0",
     "cors": "^2.8.5",
     "express": "^4.18.2",
+    "nodemon": "^3.1.11",
     "puppeteer": "^24.31.0",
     "puppeteer-core": "^21.0.0"
   },

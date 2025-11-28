@@ -116,7 +116,6 @@ async function scrapeIPOData() {
     }
 
     browser = await puppeteer.launch(launchOptions);
-    browser = await puppeteer.launch(launchOptions);
 
     const page = await browser.newPage();
 
