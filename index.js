@@ -1,10 +1,10 @@
-// server.js - IPO Data Proxy Server (Fixed for Render)
+// server.js - IPO Data Proxy Server (Fixed for Render - Chrome at Runtime)
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const { execSync } = require("child_process");
 
-// Try to load puppeteer (with bundled Chrome) first, fall back to puppeteer-core
 let puppeteer;
 try {
   puppeteer = require("puppeteer");
@@ -25,66 +25,109 @@ let cachedData = null;
 let lastFetchTime = null;
 const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 
-// Function to find Chrome executable
-function findChromeExecutable() {
-  // First check if CHROME_PATH env variable is set
-  if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
-    console.log(`✓ Using CHROME_PATH: ${process.env.CHROME_PATH}`);
-    return process.env.CHROME_PATH;
+// Chrome installation flag
+let chromeReady = false;
+let chromeExecutablePath = null;
+
+// Function to install Chrome at runtime if needed
+async function ensureChromeInstalled() {
+  if (chromeReady) return chromeExecutablePath;
+
+  console.log("🔍 Checking for Chrome installation...");
+
+  // Check if we're on Render (production)
+  const isProduction =
+    process.env.RENDER || process.env.NODE_ENV === "production";
+
+  if (!isProduction) {
+    console.log("🏠 Running locally - will use bundled Chrome");
+    chromeReady = true;
+    return null;
   }
 
-  const basePath = "/tmp/chrome";
+  const chromePath = "/tmp/chrome";
 
   try {
-    // Check if base path exists (production/Render)
-    if (!fs.existsSync(basePath)) {
-      console.log("ℹ️  /tmp/chrome does not exist (probably localhost)");
-      return null; // Will use bundled Chrome
-    }
-
-    // List contents of /tmp/chrome
-    const contents = fs.readdirSync(basePath);
-    console.log("📁 Contents of /tmp/chrome:", contents);
-
-    // Look for chrome-linux64 directory (new format) or chrome-linux (old format)
-    for (const item of contents) {
-      const versionPath = path.join(basePath, item);
-
-      // Try chrome-linux64/chrome (new format)
-      let chromePath = path.join(versionPath, "chrome-linux64", "chrome");
-      if (fs.existsSync(chromePath)) {
-        console.log(`✓ Found Chrome at: ${chromePath}`);
-        return chromePath;
-      }
-
-      // Try chrome-linux/chrome (old format)
-      chromePath = path.join(versionPath, "chrome-linux", "chrome");
-      if (fs.existsSync(chromePath)) {
-        console.log(`✓ Found Chrome at: ${chromePath}`);
-        return chromePath;
-      }
-
-      // Try direct chrome executable
-      chromePath = path.join(versionPath, "chrome");
-      if (fs.existsSync(chromePath)) {
-        console.log(`✓ Found Chrome at: ${chromePath}`);
-        return chromePath;
+    // Check if Chrome already exists
+    if (fs.existsSync(chromePath)) {
+      console.log("✓ Chrome directory exists, searching for executable...");
+      const executable = findChromeExecutableRecursive(chromePath);
+      if (executable) {
+        console.log(`✓ Chrome found at: ${executable}`);
+        chromeExecutablePath = executable;
+        chromeReady = true;
+        return executable;
       }
     }
 
-    console.log("⚠️  Chrome executable not found in /tmp/chrome");
-    return null;
+    // Install Chrome
+    console.log("📦 Installing Chrome (this may take 30-60 seconds)...");
+    execSync(
+      `npx @puppeteer/browsers install chrome@stable --path ${chromePath}`,
+      { stdio: "inherit" }
+    );
+
+    // Find the installed Chrome
+    const executable = findChromeExecutableRecursive(chromePath);
+    if (executable) {
+      console.log(`✓ Chrome installed successfully at: ${executable}`);
+      chromeExecutablePath = executable;
+      chromeReady = true;
+      return executable;
+    } else {
+      throw new Error("Chrome installed but executable not found");
+    }
   } catch (error) {
-    console.error("Error finding Chrome:", error);
+    console.error("❌ Failed to install Chrome:", error.message);
+    console.log("⚠️  Will attempt to use bundled Chrome as fallback");
+    chromeReady = true; // Set to true to avoid repeated installation attempts
     return null;
   }
+}
+
+// Recursive function to find Chrome executable
+function findChromeExecutableRecursive(dir) {
+  if (!fs.existsSync(dir)) return null;
+
+  try {
+    const items = fs.readdirSync(dir);
+
+    for (const item of items) {
+      const fullPath = path.join(dir, item);
+
+      try {
+        const stat = fs.statSync(fullPath);
+
+        if (stat.isFile() && (item === "chrome" || item === "chromium")) {
+          // Check if file is executable
+          try {
+            fs.accessSync(fullPath, fs.constants.X_OK);
+            return fullPath;
+          } catch (e) {
+            // Not executable, continue searching
+          }
+        } else if (stat.isDirectory()) {
+          const found = findChromeExecutableRecursive(fullPath);
+          if (found) return found;
+        }
+      } catch (e) {
+        // Skip files we can't access
+        continue;
+      }
+    }
+  } catch (error) {
+    console.error(`Error reading directory ${dir}:`, error.message);
+  }
+
+  return null;
 }
 
 async function scrapeIPOData() {
   let browser = null;
 
   try {
-    const executablePath = findChromeExecutable();
+    // Ensure Chrome is installed
+    const executablePath = await ensureChromeInstalled();
 
     // Launch configuration
     const launchOptions = {
@@ -106,17 +149,14 @@ async function scrapeIPOData() {
       ],
     };
 
-    // Only set executablePath if we found one (production)
-    // Otherwise let puppeteer use its bundled Chrome (localhost)
     if (executablePath) {
       launchOptions.executablePath = executablePath;
-      console.log("🚀 Launching with custom Chrome path");
+      console.log("🚀 Launching with custom Chrome");
     } else {
-      console.log("🚀 Launching with bundled Chrome (localhost)");
+      console.log("🚀 Launching with bundled Chrome");
     }
 
     browser = await puppeteer.launch(launchOptions);
-
     const page = await browser.newPage();
 
     await page.setUserAgent(
@@ -162,8 +202,6 @@ async function scrapeIPOData() {
         if (text.includes("updat")) columnMap["updated"] = index;
         if (text.includes("anchor")) columnMap["anchor"] = index;
       });
-
-      console.log("Column mapping:", columnMap);
 
       const rows = document.querySelectorAll("#report_table tbody tr");
 
@@ -365,6 +403,8 @@ app.get("/api/ipos", async (req, res) => {
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
+    chromeReady: chromeReady,
+    chromeExecutablePath: chromeExecutablePath,
     uptime: process.uptime(),
     cached: !!cachedData,
     cacheAge: lastFetchTime
